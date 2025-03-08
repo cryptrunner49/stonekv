@@ -40,11 +40,11 @@ StoneKVR offers:
 
    func main() {
        // Initialize the store (creates a new one if it doesn't exist)
-       stone, err := stonekvr.NewStone("data.db")
+       store, err := stonekvr.NewStore("data.db")
        if err != nil {
            log.Fatal(err)
        }
-       defer stone.Close()
+       defer store.Close()
 
        // Set a key/value pair
        err = store.Set("greeting", "Hello, StoneKVR! 👋")
@@ -53,7 +53,7 @@ StoneKVR offers:
        }
 
        // Retrieve a value
-       value, err := stone.Get("greeting")
+       value, err := store.Get("greeting")
        if err != nil {
            log.Fatal(err)
        }
