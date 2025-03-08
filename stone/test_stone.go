@@ -7,16 +7,14 @@ import (
 
 func TestStore(t *testing.T) {
 	path := "test.db"
-	os.Remove(path) // Clean up before test
+	os.Remove(path)
 
-	// Create a new store
 	store, err := NewStore(path)
 	if err != nil {
 		t.Fatalf("failed to create store: %v", err)
 	}
 	defer store.Close()
 
-	// Test Set and Get
 	err = store.Set([]byte("key1"), []byte("value1"))
 	if err != nil {
 		t.Fatalf("set failed: %v", err)
@@ -29,7 +27,6 @@ func TestStore(t *testing.T) {
 		t.Errorf("expected 'value1', got '%s'", value)
 	}
 
-	// Test update
 	err = store.Set([]byte("key1"), []byte("value2"))
 	if err != nil {
 		t.Fatalf("update failed: %v", err)
@@ -42,7 +39,6 @@ func TestStore(t *testing.T) {
 		t.Errorf("expected 'value2', got '%s'", value)
 	}
 
-	// Test Delete
 	err = store.Delete([]byte("key1"))
 	if err != nil {
 		t.Fatalf("delete failed: %v", err)
@@ -52,7 +48,6 @@ func TestStore(t *testing.T) {
 		t.Error("expected error on get after delete, got nil")
 	}
 
-	// Test non-existent key
 	_, err = store.Get([]byte("key2"))
 	if err == nil {
 		t.Error("expected error on get for non-existent key, got nil")
@@ -61,9 +56,8 @@ func TestStore(t *testing.T) {
 
 func TestPersistence(t *testing.T) {
 	path := "test.db"
-	os.Remove(path) // Clean up before test
+	os.Remove(path)
 
-	// Create store and set a value
 	store, err := NewStore(path)
 	if err != nil {
 		t.Fatalf("failed to create store: %v", err)
@@ -74,7 +68,6 @@ func TestPersistence(t *testing.T) {
 	}
 	store.Close()
 
-	// Reopen store and verify persistence
 	store, err = NewStore(path)
 	if err != nil {
 		t.Fatalf("failed to reopen store: %v", err)
@@ -87,5 +80,127 @@ func TestPersistence(t *testing.T) {
 	}
 	if string(value) != "value1" {
 		t.Errorf("expected 'value1', got '%s'", value)
+	}
+}
+
+func TestPolish(t *testing.T) {
+	path := "test.db"
+	os.Remove(path)
+
+	store, err := NewStore(path)
+	if err != nil {
+		t.Fatalf("failed to create store: %v", err)
+	}
+	defer store.Close()
+
+	// Set and delete some keys
+	err = store.Set([]byte("key1"), []byte("value1"))
+	if err != nil {
+		t.Fatalf("set failed: %v", err)
+	}
+	err = store.Set([]byte("key2"), []byte("value2"))
+	if err != nil {
+		t.Fatalf("set failed: %v", err)
+	}
+	err = store.Delete([]byte("key1"))
+	if err != nil {
+		t.Fatalf("delete failed: %v", err)
+	}
+
+	// Polish the database
+	err = store.Polish()
+	if err != nil {
+		t.Fatalf("polish failed: %v", err)
+	}
+
+	// Verify only key2 remains
+	_, err = store.Get([]byte("key1"))
+	if err == nil {
+		t.Error("expected key1 to be deleted after polish")
+	}
+	value, err := store.Get([]byte("key2"))
+	if err != nil {
+		t.Fatalf("get key2 failed after polish: %v", err)
+	}
+	if string(value) != "value2" {
+		t.Errorf("expected 'value2', got '%s'", value)
+	}
+
+	// Check file size reduced (qualitatively)
+	stat, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("failed to stat file: %v", err)
+	}
+	if stat.Size() > 50 { // Rough estimate: [0][4][key2][6][value2] ≈ 15 bytes
+		t.Errorf("file size %d seems too large after polish", stat.Size())
+	}
+}
+
+func TestBackup(t *testing.T) {
+	path := "test.db"
+	backupFull := "test_full_backup.db"
+	backupPolished := "test_polished_backup.db"
+	os.Remove(path)
+	os.Remove(backupFull)
+	os.Remove(backupPolished)
+
+	store, err := NewStore(path)
+	if err != nil {
+		t.Fatalf("failed to create store: %v", err)
+	}
+	defer store.Close()
+
+	// Set and delete some keys
+	err = store.Set([]byte("key1"), []byte("value1"))
+	if err != nil {
+		t.Fatalf("set failed: %v", err)
+	}
+	err = store.Set([]byte("key2"), []byte("value2"))
+	if err != nil {
+		t.Fatalf("set failed: %v", err)
+	}
+	err = store.Delete([]byte("key1"))
+	if err != nil {
+		t.Fatalf("delete failed: %v", err)
+	}
+
+	// Full backup
+	err = store.Backup(backupFull, false)
+	if err != nil {
+		t.Fatalf("full backup failed: %v", err)
+	}
+	fullStore, err := NewStore(backupFull)
+	if err != nil {
+		t.Fatalf("failed to open full backup: %v", err)
+	}
+	defer fullStore.Close()
+	value, err := fullStore.Get([]byte("key2"))
+	if err != nil {
+		t.Fatalf("get from full backup failed: %v", err)
+	}
+	if string(value) != "value2" {
+		t.Errorf("expected 'value2' in full backup, got '%s'", value)
+	}
+
+	// Polished backup
+	err = store.Backup(backupPolished, true)
+	if err != nil {
+		t.Fatalf("polished backup failed: %v", err)
+	}
+	polishedStore, err := NewStore(backupPolished)
+	if err != nil {
+		t.Fatalf("failed to open polished backup: %v", err)
+	}
+	defer polishedStore.Close()
+	_, err = polishedStore.Get([]byte("key1"))
+	if err == nil {
+		t.Error("expected key1 to be absent in polished backup")
+	}
+	value, err = polishedStore.Get([]byte("key2"))
+	if err != nil {
+		t.Fatalf("get from polished backup failed: %v", err)
+	}
+	if string(value) != "value2" {
+		t.Errorf("expected 'value2' in polished backup, got '%s'", value)
 	}
 }

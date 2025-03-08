@@ -16,21 +16,17 @@ type Store struct {
 }
 
 // NewStore initializes or opens a StoneKVR store at the given file path.
-// It creates the file if it doesn't exist and builds the in-memory index.
 func NewStore(path string) (*Store, error) {
-	// Open file with read/write, create if not exists, and append mode
 	file, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE|os.O_APPEND, 0666)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open file: %v", err)
 	}
 
-	// Initialize the store
 	store := &Store{
 		file:  file,
 		index: make(map[string]uint64),
 	}
 
-	// Build the index from the file
 	err = store.buildIndex()
 	if err != nil {
 		file.Close()
@@ -41,7 +37,6 @@ func NewStore(path string) (*Store, error) {
 }
 
 // buildIndex reads the file and constructs the in-memory index.
-// It processes set and delete records to determine the latest state of each key.
 func (s *Store) buildIndex() error {
 	_, err := s.file.Seek(0, io.SeekStart)
 	if err != nil {
@@ -49,30 +44,26 @@ func (s *Store) buildIndex() error {
 	}
 
 	for {
-		// Get the starting offset of the current record
 		startOffset, err := s.file.Seek(0, io.SeekCurrent)
 		if err != nil {
 			return err
 		}
 
-		// Read record type (0 for set, 1 for delete)
 		var typeByte byte
 		err = binary.Read(s.file, binary.LittleEndian, &typeByte)
 		if err == io.EOF {
-			break // End of file reached
+			break
 		}
 		if err != nil {
 			return err
 		}
 
-		// Read key length
 		var keyLen uint32
 		err = binary.Read(s.file, binary.LittleEndian, &keyLen)
 		if err != nil {
 			return err
 		}
 
-		// Read key bytes
 		keyBytes := make([]byte, keyLen)
 		_, err = s.file.Read(keyBytes)
 		if err != nil {
@@ -81,11 +72,9 @@ func (s *Store) buildIndex() error {
 		keyStr := string(keyBytes)
 
 		if typeByte == 0 { // Set record
-			// Calculate offset where value length starts
 			valLenOffset := uint64(startOffset) + 1 + 4 + uint64(keyLen)
 			s.index[keyStr] = valLenOffset
 
-			// Read and skip the value
 			var valLen uint32
 			err = binary.Read(s.file, binary.LittleEndian, &valLen)
 			if err != nil {
@@ -105,26 +94,22 @@ func (s *Store) buildIndex() error {
 }
 
 // Set stores a key/value pair in the database.
-// It appends the record to the file and updates the index.
 func (s *Store) Set(key, value []byte) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	// Construct the set record: [0][key_len][key][val_len][val]
 	record := make([]byte, 1+4+len(key)+4+len(value))
-	record[0] = 0 // Type: set
+	record[0] = 0
 	binary.LittleEndian.PutUint32(record[1:5], uint32(len(key)))
 	copy(record[5:5+len(key)], key)
 	binary.LittleEndian.PutUint32(record[5+len(key):9+len(key)], uint32(len(value)))
 	copy(record[9+len(key):], value)
 
-	// Write the record to the file
 	_, err := s.file.Write(record)
 	if err != nil {
 		return fmt.Errorf("failed to write record: %v", err)
 	}
 
-	// Calculate the offset where val_len starts
 	stat, err := s.file.Stat()
 	if err != nil {
 		return fmt.Errorf("failed to get file stat: %v", err)
@@ -132,37 +117,31 @@ func (s *Store) Set(key, value []byte) error {
 	startOffset := stat.Size() - int64(len(record))
 	valLenOffset := uint64(startOffset) + 1 + 4 + uint64(len(key))
 
-	// Update the index
 	s.index[string(key)] = valLenOffset
 	return nil
 }
 
 // Get retrieves the value associated with a key.
-// Returns an error if the key does not exist.
 func (s *Store) Get(key []byte) ([]byte, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	// Look up the value offset in the index
 	offset, ok := s.index[string(key)]
 	if !ok {
 		return nil, fmt.Errorf("key not found")
 	}
 
-	// Seek to the value length position
 	_, err := s.file.Seek(int64(offset), io.SeekStart)
 	if err != nil {
 		return nil, fmt.Errorf("failed to seek: %v", err)
 	}
 
-	// Read value length
 	var valLen uint32
 	err = binary.Read(s.file, binary.LittleEndian, &valLen)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read value length: %v", err)
 	}
 
-	// Read the value
 	value := make([]byte, valLen)
 	_, err = s.file.Read(value)
 	if err != nil {
@@ -173,25 +152,177 @@ func (s *Store) Get(key []byte) ([]byte, error) {
 }
 
 // Delete removes a key from the database.
-// It appends a delete record and removes the key from the index.
 func (s *Store) Delete(key []byte) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	// Construct the delete record: [1][key_len][key]
 	record := make([]byte, 1+4+len(key))
-	record[0] = 1 // Type: delete
+	record[0] = 1
 	binary.LittleEndian.PutUint32(record[1:5], uint32(len(key)))
 	copy(record[5:], key)
 
-	// Write the record to the file
 	_, err := s.file.Write(record)
 	if err != nil {
 		return fmt.Errorf("failed to write delete record: %v", err)
 	}
 
-	// Remove the key from the index
 	delete(s.index, string(key))
+	return nil
+}
+
+// Polish compacts the database by creating a new file with only active key/value pairs.
+// It backs up the original file before replacing it with the polished version.
+func (s *Store) Polish() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	// Get the current file path
+	origPath := s.file.Name()
+
+	// Create a backup before polishing
+	backupPath := origPath + ".backup"
+	err := s.backupTo(backupPath, false) // Full backup
+	if err != nil {
+		return fmt.Errorf("failed to create backup before polish: %v", err)
+	}
+
+	// Create a temporary file for the polished database
+	tempPath := origPath + ".tmp"
+	tempFile, err := os.OpenFile(tempPath, os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0666)
+	if err != nil {
+		return fmt.Errorf("failed to create temp file: %v", err)
+	}
+	defer tempFile.Close()
+
+	// Write only active key/value pairs from the index
+	for key, offset := range s.index {
+		// Seek to the value in the original file
+		_, err = s.file.Seek(int64(offset), io.SeekStart)
+		if err != nil {
+			return fmt.Errorf("failed to seek to value offset: %v", err)
+		}
+
+		// Read value length and value
+		var valLen uint32
+		err = binary.Read(s.file, binary.LittleEndian, &valLen)
+		if err != nil {
+			return fmt.Errorf("failed to read value length: %v", err)
+		}
+		value := make([]byte, valLen)
+		_, err = s.file.Read(value)
+		if err != nil {
+			return fmt.Errorf("failed to read value: %v", err)
+		}
+
+		// Write set record to temp file
+		keyBytes := []byte(key)
+		record := make([]byte, 1+4+len(keyBytes)+4+len(value))
+		record[0] = 0
+		binary.LittleEndian.PutUint32(record[1:5], uint32(len(keyBytes)))
+		copy(record[5:5+len(keyBytes)], keyBytes)
+		binary.LittleEndian.PutUint32(record[5+len(keyBytes):9+len(keyBytes)], valLen)
+		copy(record[9+len(keyBytes):], value)
+
+		_, err = tempFile.Write(record)
+		if err != nil {
+			return fmt.Errorf("failed to write polished record: %v", err)
+		}
+	}
+
+	// Close the original file and replace it with the temp file
+	err = s.file.Close()
+	if err != nil {
+		return fmt.Errorf("failed to close original file: %v", err)
+	}
+	err = os.Rename(tempPath, origPath)
+	if err != nil {
+		return fmt.Errorf("failed to replace original file: %v", err)
+	}
+
+	// Reopen the polished file
+	s.file, err = os.OpenFile(origPath, os.O_RDWR|os.O_APPEND, 0666)
+	if err != nil {
+		return fmt.Errorf("failed to reopen polished file: %v", err)
+	}
+
+	// Rebuild the index (optional, since it’s still valid, but ensures consistency)
+	err = s.buildIndex()
+	if err != nil {
+		return fmt.Errorf("failed to rebuild index after polish: %v", err)
+	}
+
+	return nil
+}
+
+// Backup creates a backup of the database at the specified path.
+// If polished is true, only active key/value pairs are included; otherwise, it’s a full copy.
+func (s *Store) Backup(path string, polished bool) error {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	return s.backupTo(path, polished)
+}
+
+// backupTo is a helper function to create a backup (locked separately for Polish).
+func (s *Store) backupTo(path string, polished bool) error {
+	if polished {
+		// Create a temp store at the backup path and write only active records
+		backupFile, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0666)
+		if err != nil {
+			return fmt.Errorf("failed to create backup file: %v", err)
+		}
+		defer backupFile.Close()
+
+		for key, offset := range s.index {
+			_, err = s.file.Seek(int64(offset), io.SeekStart)
+			if err != nil {
+				return fmt.Errorf("failed to seek to value offset: %v", err)
+			}
+
+			var valLen uint32
+			err = binary.Read(s.file, binary.LittleEndian, &valLen)
+			if err != nil {
+				return fmt.Errorf("failed to read value length: %v", err)
+			}
+			value := make([]byte, valLen)
+			_, err = s.file.Read(value)
+			if err != nil {
+				return fmt.Errorf("failed to read value: %v", err)
+			}
+
+			keyBytes := []byte(key)
+			record := make([]byte, 1+4+len(keyBytes)+4+len(value))
+			record[0] = 0
+			binary.LittleEndian.PutUint32(record[1:5], uint32(len(keyBytes)))
+			copy(record[5:5+len(keyBytes)], keyBytes)
+			binary.LittleEndian.PutUint32(record[5+len(keyBytes):9+len(keyBytes)], valLen)
+			copy(record[9+len(keyBytes):], value)
+
+			_, err = backupFile.Write(record)
+			if err != nil {
+				return fmt.Errorf("failed to write backup record: %v", err)
+			}
+		}
+	} else {
+		// Full backup: copy the entire file
+		src, err := os.Open(s.file.Name())
+		if err != nil {
+			return fmt.Errorf("failed to open source file: %v", err)
+		}
+		defer src.Close()
+
+		dst, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0666)
+		if err != nil {
+			return fmt.Errorf("failed to create backup file: %v", err)
+		}
+		defer dst.Close()
+
+		_, err = io.Copy(dst, src)
+		if err != nil {
+			return fmt.Errorf("failed to copy file: %v", err)
+		}
+	}
+
 	return nil
 }
 
