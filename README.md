@@ -40,11 +40,11 @@ StoneKVR offers:
 
    func main() {
        // Initialize the store (creates a new one if it doesn't exist)
-       store, err := stonekvr.NewStore("data.db")
+       stone, err := stonekvr.NewStone("data.db")
        if err != nil {
            log.Fatal(err)
        }
-       defer store.Close()
+       defer stone.Close()
 
        // Set a key/value pair
        err = store.Set("greeting", "Hello, StoneKVR! 👋")
@@ -53,7 +53,7 @@ StoneKVR offers:
        }
 
        // Retrieve a value
-       value, err := store.Get("greeting")
+       value, err := stone.Get("greeting")
        if err != nil {
            log.Fatal(err)
        }
@@ -63,7 +63,7 @@ StoneKVR offers:
 
 ## Contributing 🤝
 
-We welcome contributions! Please see our [CONTRIBUTING.md](./CONTRIBUTING.md) for details on our code of conduct, submission guidelines, and more.
+We welcome contributions! Check out our [CONTRIBUTING.md](./CONTRIBUTING.md) for guidelines.
 
 ## License 📜
 
